@@ -74,18 +74,20 @@ with st.sidebar:
 
 # --- ASIGNACIÓN DE VALORES DE APERTURA ---
 xsp_930, vix1d_930, em_call_930, em_put_930 = None, None, None, None
+em_pts_930 = None # Línea añadida para guardar los puntos de apertura
 apertura_fijada = False
 
 # Si el mercado ya abrió (09:30 AM NY o posterior), extraemos la primera barra del gráfico de hoy
 if hora_ny.time() >= time(9, 30):
     xsp_930, vix1d_930 = obtener_apertura_desde_historico_un_minuto()
     if xsp_930 and vix1d_930:
-        _, em_call_930, em_put_930 = calcular_em(xsp_930, vix1d_930)
+        em_pts_930, em_call_930, em_put_930 = calcular_em(xsp_930, vix1d_930) # Modificado para capturar em_pts_930
         apertura_fijada = True
 
 # Bloque 1: Apertura de Mercado (Fijo y protegido en el hilo principal)
 st.subheader("🏁 Fijado a la Apertura (09:30 AM NY)")
 if apertura_fijada:
+    st.metric("Movimiento Esperado Inicial (Puntos sin redondeo)", f"±{em_pts_930:.4f}") # Línea añadida
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("XSP Apertura", f"${xsp_930:.2f}")
     col2.metric("VIX1D Apertura", f"{vix1d_930:.2f}%")
@@ -102,9 +104,10 @@ def render_live_data(xsp_ref, vix_ref, call_ref, put_ref, fijado):
     xsp_act, vix_act = obtener_datos_actuales()
 
     if xsp_act and vix_act:
-        _, em_call_act, em_put_act = calcular_em(xsp_act, vix_act)
+        em_pts_act, em_call_act, em_put_act = calcular_em(xsp_act, vix_act) # Modificado para capturar em_pts_act
 
         st.subheader(f"⚡ Tiempo Real (Actualizado a las {datetime.now(tz_ny).strftime('%H:%M:%S')} NY)")
+        st.metric("Movimiento Esperado Actual (Puntos sin redondeo)", f"±{em_pts_act:.4f}") # Línea añadida
         col1_act, col2_act, col3_act, col4_act = st.columns(4)
         
         col1_act.metric("XSP Actual", f"${xsp_act:.2f}")
@@ -130,3 +133,4 @@ def render_live_data(xsp_ref, vix_ref, call_ref, put_ref, fijado):
 
 # Ejecutar el fragmento pasándole los datos de la primera barra del día
 render_live_data(xsp_930, vix1d_930, em_call_930, em_put_930, apertura_fijada)
+    
