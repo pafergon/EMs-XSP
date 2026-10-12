@@ -15,6 +15,19 @@ st.set_page_config(
 st.title("📊 Monitor de Movimiento Esperado (XSP & VIX1D)")
 st.caption("Actualización automática minuto a minuto | Zona Horaria: Nueva York (EST/EDT)")
 
+# --- PERSISTENCIA NATIVA DEL ESTADO GLOBAL ---
+# Inicializar variables de estado en la sesión para evitar borrados por fragmentos o refrescos
+if 'xsp_930' not in st.session_state:
+    st.session_state.xsp_930 = None
+if 'vix1d_930' not in st.session_state:
+    st.session_state.vix1d_930 = None
+if 'em_call_930' not in st.session_state:
+    st.session_state.em_call_930 = None
+if 'em_put_930' not in st.session_state:
+    st.session_state.em_put_930 = None
+if 'fecha_guardada' not in st.session_state:
+    st.session_state.fecha_guardada = None
+
 # Función para calcular Movimiento Esperado y strikes
 def calcular_em(precio, vix):
     movimiento_puntos = precio * (vix / 100) / np.sqrt(365)
@@ -22,12 +35,15 @@ def calcular_em(precio, vix):
     em_put = np.floor(precio - movimiento_puntos)
     return movimiento_puntos, em_call, em_put
 
-# Función para obtener datos en tiempo real de Yahoo Finance
+# Función limpia para obtener datos en tiempo real de Yahoo Finance (Evita MultiIndex)
 def obtener_datos_actuales():
     try:
-        tickers = yf.Tickers('^XSP ^VIX1D')
-        xsp_price = tickers.tickers['^XSP'].fast_info['last_price']
-        vix1d_price = tickers.tickers['^VIX1D'].fast_info['last_price']
+        ticker_xsp = yf.Ticker('^XSP')
+        ticker_vix = yf.Ticker('^VIX1D')
+        
+        xsp_price = ticker_xsp.fast_info['last_price']
+        vix1d_price = ticker_vix.fast_info['last_price']
+        
         return round(xsp_price, 2), round(vix1d_price, 2)
     except Exception as e:
         st.error(f"⚠️ Error al conectar con Yahoo Finance (Tiempo Real): {e}")
@@ -39,100 +55,86 @@ hora_ny = datetime.now(tz_ny)
 fecha_hoy_str = hora_ny.strftime("%Y-%m-%d")
 hora_actual_str = hora_ny.strftime("%H:%M:%S")
 
-# NUEVA FUNCIÓN INFAVIBLE: Descarga el histórico de hoy de 1 minuto usando period='1d'
-@st.cache_data(ttl=60)  # TTL bajo para que intente reconectar rápido si se abre justo a las 9:30 AM
-def obtener_apertura_exacta(fecha_str):
-    try:
-        # Descargamos usando period='1d' para asegurar que devuelva los minutos de hoy sin fallar por las fechas [1, 2]
-        # group_by='ticker' evita los problemas de MultiIndex en las columnas de yfinance
-        df_xsp = yf.download('^XSP', period='1d', interval='1m', group_by='ticker', progress=False)
-        df_vix = yf.download('^VIX1D', period='1d', interval='1m', group_by='ticker', progress=False)
-        
-        if df_xsp.empty or df_vix.empty:
-            return None, None
-            
-        # Convertir índices a zona horaria de NY de forma segura
-        df_xsp.index = df_xsp.index.tz_convert('America/New_York')
-        df_vix.index = df_vix.index.tz_convert('America/New_York')
-        
-        # Filtrar el minuto de la apertura (09:30 - 09:31)
-        apertura_xsp = df_xsp.between_time('09:30', '09:31')
-        apertura_vix = df_vix.between_time('09:30', '09:31')
-        
-        if not apertura_xsp.empty and not apertura_vix.empty:
-            # Extraemos el valor de la columna 'Open' de forma segura sin importar MultiIndex
-            val_xsp = float(apertura_xsp['Open'].dropna().iloc[0])
-            val_vix = float(apertura_vix['Open'].dropna().iloc[0])
-            return round(val_xsp, 2), round(val_vix, 2)
-            
-        return None, None
-    except Exception:
-        return None, None
+# Control de reinicio diario automático: si cambia el día, limpiamos la apertura anterior
+if st.session_state.fecha_guardada != fecha_hoy_str:
+    st.session_state.xsp_930 = None
+    st.session_state.vix1d_930 = None
+    st.session_state.em_call_930 = None
+    st.session_state.em_put_930 = None
+    st.session_state.fecha_guardada = fecha_hoy_str
 
-# --- LÓGICA DE CONTROL DE FLUJO ---
-xsp_930, vix1d_930, em_call_930, em_put_930 = None, None, None, None
-apertura_fijada = False
-
-# Solo intentamos buscar la apertura si el reloj de NY ya superó las 09:30 AM
-if hora_ny.time() >= time(9, 30):
-    xsp_930, vix1d_930 = obtener_apertura_exacta(fecha_hoy_str)
-    if xsp_930 and vix1d_930:
-        _, em_call_930, em_put_930 = calcular_em(xsp_930, vix1d_930)
-        apertura_fijada = True
-
-# Barra lateral informativa
+# Barra lateral informativa y controles manuales
 with st.sidebar:
     st.header("⚙️ Controles")
-    if st.button("🔄 Forzar Sincronización"):
-        st.cache_data.clear()
+    if st.button("🔄 Resetear Apertura Manualmente"):
+        st.session_state.xsp_930 = None
+        st.session_state.vix1d_930 = None
+        st.session_state.em_call_930 = None
+        st.session_state.em_put_930 = None
         st.rerun()
     st.info(f"🕒 Hora NY: {hora_actual_str}")
 
-# Bloque 1 fijo: Estructura estática para la Apertura (Protegida contra refrescos)
+# --- CAPTURA EN TIEMPO REAL AL PASAR LAS 9:30 AM ---
+# Obtenemos los precios actuales del mercado en el hilo principal
+xsp_actual, vix1d_actual = obtener_datos_actuales()
+
+if xsp_actual and vix1d_actual:
+    # Si ya es hora de apertura o más tarde, y aún no hemos congelado los valores de hoy...
+    if hora_ny.time() >= time(9, 30) and st.session_state.xsp_930 is None:
+        st.session_state.xsp_930 = xsp_actual
+        st.session_state.vix1d_930 = vix1d_actual
+        _, em_call_fijo, em_put_fijo = calcular_em(xsp_actual, vix1d_actual)
+        st.session_state.em_call_930 = em_call_fijo
+        st.session_state.em_put_930 = em_put_fijo
+
+# Verificar si la apertura ya quedó fijada y guardada en memoria
+apertura_fijada = st.session_state.xsp_930 is not None
+
+# Bloque 1: Apertura de Mercado (Estructura fija protegida fuera del fragmento dinámico)
 st.subheader("🏁 Fijado a la Apertura (09:30 AM NY)")
 if apertura_fijada:
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("XSP Apertura", f"${xsp_930:.2f}")
-    col2.metric("VIX1D Apertura", f"{vix1d_930:.2f}%")
-    col3.metric("EM0call (Techo 🔺)", f"{em_call_930:.0f}")
-    col4.metric("EM0put (Suelo 🔻)", f"{em_put_930:.0f}")
+    col1.metric("XSP Apertura", f"${st.session_state.xsp_930:.2f}")
+    col2.metric("VIX1D Apertura", f"{st.session_state.vix1d_930:.2f}%")
+    col3.metric("EM0call (Techo 🔺)", f"{st.session_state.em_call_930:.0f}")
+    col4.metric("EM0put (Suelo 🔻)", f"{st.session_state.em_put_930:.0f}")
 else:
-    st.warning(f"⏳ Esperando que el mercado abra y consolide los datos de las 09:30 AM NY. Hora actual en NY: {hora_ny.strftime('%H:%M')}")
+    st.warning(f"⏳ Esperando que el mercado abra (09:30 AM NY) para fijar los valores iniciales. Hora actual en NY: {hora_ny.strftime('%H:%M')}")
 
 st.markdown("---")
 
-# Bloque 2 dinámico: Usamos fragmento exclusivamente para actualizar el tiempo real cada 60 segundos
+# Bloque 2 dinámico: Usamos el fragmento puramente para renderizar y actualizar el Tiempo Real cada 60 segundos
 @st.fragment(run_every=60)
-def render_live_data(xsp_ref, vix_ref, call_ref, put_ref, fijado):
-    xsp_actual, vix1d_actual = obtener_datos_actuales()
+def render_live_data(fijado):
+    # Volvemos a pedir datos frescos para la actualización minuto a minuto en vivo
+    xsp_act, vix_act = obtener_datos_actuales()
 
-    if xsp_actual and vix1d_actual:
-        # Calcular métricas del estado actual (Vivo)
-        _, em_call_act, em_put_act = calcular_em(xsp_actual, vix1d_actual)
+    if xsp_act and vix_act:
+        _, em_call_act, em_put_act = calcular_em(xsp_act, vix_act)
 
         st.subheader(f"⚡ Tiempo Real (Actualizado a las {datetime.now(tz_ny).strftime('%H:%M:%S')} NY)")
         col1_act, col2_act, col3_act, col4_act = st.columns(4)
         
-        col1_act.metric("XSP Actual", f"${xsp_actual:.2f}")
-        col2_act.metric("VIX1D Actual", f"{vix1d_actual:.2f}%")
+        col1_act.metric("XSP Actual", f"${xsp_act:.2f}")
+        col2_act.metric("VIX1D Actual", f"{vix_act:.2f}%")
         col3_act.metric("EM0call Actual 🔺", f"{em_call_act:.0f}")
         col4_act.metric("EM0put Actual 🔻", f"{em_put_act:.0f}")
 
-        # Tabla resumen de desviaciones utilizando las variables estáticas externas heredadas
+        # Tabla resumen utilizando los datos de sesión globales estables del hilo principal
         if fijado:
             st.markdown("### 📊 Comparativa vs Apertura")
             df_comp = pd.DataFrame({
                 "Métrica": ["Precio XSP", "Volatilidad VIX1D", "Strike EM0call", "Strike EM0put"],
-                "Apertura (9:30)": [xsp_ref, vix_ref, call_ref, put_ref],
-                "Actual": [xsp_actual, vix1d_actual, em_call_act, em_put_act],
+                "Apertura (9:30)": [st.session_state.xsp_930, st.session_state.vix1d_930, st.session_state.em_call_930, st.session_state.em_put_930],
+                "Actual": [xsp_act, vix_act, em_call_act, em_put_act],
                 "Diferencia": [
-                    round(xsp_actual - xsp_ref, 2), 
-                    round(vix1d_actual - vix_ref, 2), 
-                    int(em_call_act - call_ref), 
-                    int(em_put_act - put_ref)
+                    round(xsp_act - st.session_state.xsp_930, 2), 
+                    round(vix_act - st.session_state.vix1d_930, 2), 
+                    int(em_call_act - st.session_state.em_call_930), 
+                    int(em_put_act - st.session_state.em_put_930)
                 ]
             })
             st.table(df_comp)
 
-# Ejecutar el fragmento dinámico pasándole los parámetros fijos del scope global
-render_live_data(xsp_930, vix1d_930, em_call_930, em_put_930, apertura_fijada)
+# Lanzamos el proceso recurrente pasando el booleano de control
+render_live_data(apertura_fijada)
