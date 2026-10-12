@@ -2,7 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 import pytz
 
 # Configuración de la página
@@ -39,33 +39,30 @@ hora_ny = datetime.now(tz_ny)
 fecha_hoy_str = hora_ny.strftime("%Y-%m-%d")
 hora_actual_str = hora_ny.strftime("%H:%M:%S")
 
-# NUEVA FUNCIÓN OPTIMIZADA: Descarga solo la primera barra de las 09:30 AM
-@st.cache_data(ttl=28800)  # Guarda el resultado en caché durante 8 horas para evitar llamadas redundantes
+# NUEVA FUNCIÓN INFAVIBLE: Descarga el histórico de hoy de 1 minuto usando period='1d'
+@st.cache_data(ttl=60)  # TTL bajo para que intente reconectar rápido si se abre justo a las 9:30 AM
 def obtener_apertura_exacta(fecha_str):
     try:
-        # Forzar un rango estrecho para evitar sobrecarga y asegurar la descarga de datos de 1 minuto
-        start_date = datetime.strptime(fecha_str, "%Y-%m-%d")
-        end_date = start_date + timedelta(days=1)
+        # Descargamos usando period='1d' para asegurar que devuelva los minutos de hoy sin fallar por las fechas [1, 2]
+        # group_by='ticker' evita los problemas de MultiIndex en las columnas de yfinance
+        df_xsp = yf.download('^XSP', period='1d', interval='1m', group_by='ticker', progress=False)
+        df_vix = yf.download('^VIX1D', period='1d', interval='1m', group_by='ticker', progress=False)
         
-        # Descarga con estructura explícita para evitar errores de MultiIndex de Pandas
-        data_xsp = yf.download('^XSP', start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'), interval='1m', progress=False)
-        data_vix = yf.download('^VIX1D', start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'), interval='1m', progress=False)
-        
-        if data_xsp.empty or data_vix.empty:
+        if df_xsp.empty or df_vix.empty:
             return None, None
             
         # Convertir índices a zona horaria de NY de forma segura
-        data_xsp.index = data_xsp.index.tz_convert('America/New_York')
-        data_vix.index = data_vix.index.tz_convert('America/New_York')
+        df_xsp.index = df_xsp.index.tz_convert('America/New_York')
+        df_vix.index = df_vix.index.tz_convert('America/New_York')
         
-        # Filtrar exactamente el minuto de la apertura (09:30 - 09:31)
-        apertura_xsp = data_xsp.between_time('09:30', '09:31')
-        apertura_vix = data_vix.between_time('09:30', '09:31')
+        # Filtrar el minuto de la apertura (09:30 - 09:31)
+        apertura_xsp = df_xsp.between_time('09:30', '09:31')
+        apertura_vix = df_vix.between_time('09:30', '09:31')
         
         if not apertura_xsp.empty and not apertura_vix.empty:
-            # Obtenemos el precio de apertura ('Open') de la primera barra del día
-            val_xsp = float(apertura_xsp['Open'].iloc[0])
-            val_vix = float(apertura_vix['Open'].iloc[0])
+            # Extraemos el valor de la columna 'Open' de forma segura sin importar MultiIndex
+            val_xsp = float(apertura_xsp['Open'].dropna().iloc[0])
+            val_vix = float(apertura_vix['Open'].dropna().iloc[0])
             return round(val_xsp, 2), round(val_vix, 2)
             
         return None, None
