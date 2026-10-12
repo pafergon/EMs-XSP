@@ -22,7 +22,7 @@ def calcular_em(precio, vix):
     em_put = np.floor(precio - movimiento_puntos)
     return movimiento_puntos, em_call, em_put
 
-# Función para obtener datos en tiempo real de Yahoo Finance
+# Función para obtener datos en tiempo real de Yahoo Finance (Último precio cotizado)
 def obtener_datos_actuales():
     try:
         ticker_xsp = yf.Ticker('^XSP')
@@ -36,22 +36,26 @@ def obtener_datos_actuales():
         st.error(f"⚠️ Error al conectar con Yahoo Finance (Tiempo Real): {e}")
         return None, None
 
-# NUEVA FUNCIÓN INFAVIBLE: Obtiene el precio oficial de apertura del mercado de los datos estáticos de Yahoo
-@st.cache_data(ttl=3600) # Cacheamos por 1 hora para evitar peticiones repetidas innecesarias
-def obtener_valores_apertura_oficiales():
+# NUEVA FUNCIÓN INFAVIBLE: Extrae la primera barra del gráfico de un minuto de hoy
+@st.cache_data(ttl=300)  # Cachea por 5 minutos para no saturar la API
+def obtener_apertura_desde_historico_un_minuto():
     try:
-        ticker_xsp = yf.Ticker('^XSP')
-        ticker_vix = yf.Ticker('^VIX1D')
+        t_xsp = yf.Ticker('^XSP')
+        t_vix = yf.Ticker('^VIX1D')
         
-        # Extraemos el precio oficial de apertura bursátil asignado por el mercado a las 9:30 AM
-        xsp_open = ticker_xsp.info.get('open') or ticker_xsp.fast_info['open']
+        # Solicitamos el gráfico de 1 minuto para el día de hoy
+        df_xsp = t_xsp.history(period="1d", interval="1m")
+        df_vix = t_vix.history(period="1d", interval="1m")
         
-        # Para el VIX1D, si el 'open' de hoy no está consolidado, tomamos el cierre previo o el valor regular de apertura
-        vix_open = ticker_vix.info.get('open') or ticker_vix.info.get('previousClose')
+        if df_xsp.empty or df_vix.empty:
+            return None, None
         
-        if xsp_open and vix_open:
-            return round(float(xsp_open), 2), round(float(vix_open), 2)
-        return None, None
+        # Localizar y extraer de forma segura el valor 'Open' de la PRIMERA barra registrada del día (09:30 AM NY)
+        # Usamos .iloc[0] para asegurar que sea el primer dato de la mañana sin importar los husos horarios
+        xsp_open = float(df_xsp['Open'].iloc[0])
+        vix_open = float(df_vix['Open'].iloc[0])
+        
+        return round(xsp_open, 2), round(vix_open, 2)
     except Exception:
         return None, None
 
@@ -68,19 +72,19 @@ with st.sidebar:
         st.rerun()
     st.info(f"🕒 Hora NY: {hora_actual_str}")
 
-# --- OBTENCIÓN DE DATOS DE APERTURA OFICIALES ---
+# --- ASIGNACIÓN DE VALORES DE APERTURA ---
 xsp_930, vix1d_930, em_call_930, em_put_930 = None, None, None, None
 apertura_fijada = False
 
-# Si ya pasó la hora de la apertura (9:30 AM NY), traemos los datos fijos del "Open" del mercado de hoy
+# Si el mercado ya abrió (09:30 AM NY o posterior), extraemos la primera barra del gráfico de hoy
 if hora_ny.time() >= time(9, 30):
-    xsp_930, vix1d_930 = obtener_valores_apertura_oficiales()
+    xsp_930, vix1d_930 = obtener_apertura_desde_historico_un_minuto()
     if xsp_930 and vix1d_930:
         _, em_call_930, em_put_930 = calcular_em(xsp_930, vix1d_930)
         apertura_fijada = True
 
-# Bloque 1: Apertura de Mercado (Estructura Fija con los datos oficiales de Apertura de Yahoo)
-st.subheader("🏁 Fijado a la Apertura (09:30 AM NY Oficial)")
+# Bloque 1: Apertura de Mercado (Fijo y protegido en el hilo principal)
+st.subheader("🏁 Fijado a la Apertura (09:30 AM NY)")
 if apertura_fijada:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("XSP Apertura", f"${xsp_930:.2f}")
@@ -88,14 +92,13 @@ if apertura_fijada:
     col3.metric("EM0call (Techo 🔺)", f"{em_call_930:.0f}")
     col4.metric("EM0put (Suelo 🔻)", f"{em_put_930:.0f}")
 else:
-    st.warning(f"⏳ Esperando que el mercado abra (09:30 AM NY) para fijar los valores iniciales. Hora actual en NY: {hora_ny.strftime('%H:%M')}")
+    st.warning(f"⏳ Esperando que el mercado abra y consolide la primera barra de las 09:30 AM NY. Hora actual en NY: {hora_ny.strftime('%H:%M')}")
 
 st.markdown("---")
 
 # Bloque 2 dinámico: Fragmento aislado para actualizar el tiempo real cada 60 segundos
 @st.fragment(run_every=60)
 def render_live_data(xsp_ref, vix_ref, call_ref, put_ref, fijado):
-    # Pedimos los precios que cotizan en este preciso instante de forma independiente
     xsp_act, vix_act = obtener_datos_actuales()
 
     if xsp_act and vix_act:
@@ -109,7 +112,7 @@ def render_live_data(xsp_ref, vix_ref, call_ref, put_ref, fijado):
         col3_act.metric("EM0call Actual 🔺", f"{em_call_act:.0f}")
         col4_act.metric("EM0put Actual 🔻", f"{em_put_act:.0f}")
 
-        # Tabla resumen utilizando las referencias estáticas reales calculadas al inicio
+        # Tabla resumen utilizando las referencias estáticas reales pasadas por argumento
         if fijado:
             st.markdown("### 📊 Comparativa vs Apertura")
             df_comp = pd.DataFrame({
@@ -125,5 +128,5 @@ def render_live_data(xsp_ref, vix_ref, call_ref, put_ref, fijado):
             })
             st.table(df_comp)
 
-# Ejecutar el fragmento pasándole las referencias globales calculadas de la apertura real
+# Ejecutar el fragmento pasándole los datos de la primera barra del día
 render_live_data(xsp_930, vix1d_930, em_call_930, em_put_930, apertura_fijada)
